@@ -210,17 +210,17 @@ if __name__ == "__main__":
     plot_gap_both(cargo_range, results,
                   f"outputs/gap_direct_vs_inverse_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
 
-    print()
-    print("=" * 70)
-    print(f"СО ШТРАФОМ ЗА ПЕРЕХОД: грузы {N_PAIRS}->{N_CARGOS_MAX}, "
-          f"{N_ISLANDS} островов, {N_PAIRS} пары, {N_SEEDS} seed на точку")
-    print("=" * 70)
-    cargo_range_p, results_p = sweep_n_cargos(n_seeds=N_SEEDS, use_penalty=True)
-    plot_single_heuristic(cargo_range_p, results_p, "direct",
-                           f"outputs/direct_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
-    plot_single_heuristic(cargo_range_p, results_p, "inverse",
-                           f"outputs/inverse_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
-    plot_single_heuristic(cargo_range_p, results_p, "ratio",
-                           f"outputs/ratio_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
-    plot_gap_both(cargo_range_p, results_p,
-                  f"outputs/gap_direct_vs_inverse_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
+    # print()
+    # print("=" * 70)
+    # print(f"СО ШТРАФОМ ЗА ПЕРЕХОД: грузы {N_PAIRS}->{N_CARGOS_MAX}, "
+    #       f"{N_ISLANDS} островов, {N_PAIRS} пары, {N_SEEDS} seed на точку")
+    # print("=" * 70)
+    # cargo_range_p, results_p = sweep_n_cargos(n_seeds=N_SEEDS, use_penalty=True)
+    # plot_single_heuristic(cargo_range_p, results_p, "direct",
+    #                        f"outputs/direct_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
+    # plot_single_heuristic(cargo_range_p, results_p, "inverse",
+    #                        f"outputs/inverse_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
+    # plot_single_heuristic(cargo_range_p, results_p, "ratio",
+    #                        f"outputs/ratio_real_vs_estimate_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")
+    # plot_gap_both(cargo_range_p, results_p,
+    #               f"outputs/gap_direct_vs_inverse_penalty_{N_PAIRS}to{N_CARGOS_MAX}cargos.png")

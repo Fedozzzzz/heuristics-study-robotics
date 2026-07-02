@@ -54,7 +54,7 @@ class TaskResult:
     pair_id: str
     feasible: bool
     path: List[int] = field(default_factory=list)        # P* - маршрут доставки v_start->v_finish
-    bridges: List[Tuple[int, int]] = field(default_factory=list)  # E_b - все построенные мосты
+    bridges: List[Tuple[int, int]] = field(default_factory=list)  # E_b - все построенные мосты (все 3 шага)
     approach_path: List[int] = field(default_factory=list)  # подъезд доставщика deliverer_pos->v_start
     W_d: float = math.inf
     W_b: float = math.inf

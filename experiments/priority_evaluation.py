@@ -169,6 +169,76 @@ def apply_transition_penalty(task_costs: Dict[str, TaskResult],
     return penalized
 
 
+def compute_pool_corrected_costs(env: IslandGraph, cargos: List[Cargo],
+                                  task_costs: Dict[str, TaskResult]
+                                  ) -> Dict[str, TaskResult]:
+    """
+    Корректировка оценки W_b^i с учётом переиспользования мостов внутри пары
+    (Вариант B: вычитаем стоимость повторных построек из уже посчитанных W_b^i).
+
+    Для каждой пары k считается "пул стоимости строительства":
+
+        W_b^pool(k) = sum_i W_b^i  -  sum_e (c_e - 1) * w_build(e)
+
+    где c_e - число грузов пары k, требующих моста e (из result.bridges всех
+    трёх шагов), w_build(e) - стоимость строительства этого моста.
+    Смысл: каждый уникальный мост платится ровно один раз, а не c_e раз.
+    Переезды строителя между мостами не пересчитываются (берутся из исходных
+    W_b^i) - это приближение.
+
+    Скорректированная оценка для груза c_i:
+
+        W_b_hat^i = W_b^pool(k) * W_b^i / sum_j W_b^j
+
+    то есть пул распределяется пропорционально индивидуальным W_b^i.
+
+    Возвращает новый словарь TaskResult с обновлёнными W_b (W_d не меняется).
+    Если у пары все грузы имеют W_b=0 (мостов нет), скорректированные W_b
+    тоже равны 0.
+    """
+    # собираем грузы по парам
+    cargos_by_pair: Dict[str, List[Cargo]] = {}
+    for c in cargos:
+        cargos_by_pair.setdefault(c.assigned_pair, []).append(c)
+
+    corrected: Dict[str, TaskResult] = {cid: copy.deepcopy(r)
+                                         for cid, r in task_costs.items()}
+
+    for pair_id, pair_cargos in cargos_by_pair.items():
+        feasible_cargos = [c for c in pair_cargos
+                           if task_costs[c.id].feasible]
+        if not feasible_cargos:
+            continue
+
+        # считаем c_e - сколько грузов пары требуют каждого моста
+        bridge_count: Dict[Tuple[int, int], int] = {}
+        for c in feasible_cargos:
+            r = task_costs[c.id]
+            for (u, v) in r.bridges:
+                key = (min(u, v), max(u, v))
+                bridge_count[key] = bridge_count.get(key, 0) + 1
+
+        # стоимость повторных построек, которую нужно вычесть
+        duplicate_cost = sum(
+            (count - 1) * env.G.edges[u, v]["w_build"]
+            for (u, v), count in bridge_count.items()
+            if env.G.has_edge(u, v)
+        )
+
+        # W_b^pool = sum(W_b^i) - duplicate_cost
+        wb_sum = sum(task_costs[c.id].W_b for c in feasible_cargos)
+        wb_pool = wb_sum - duplicate_cost
+
+        # распределяем пул пропорционально W_b^i
+        if wb_sum > 0:
+            for c in feasible_cargos:
+                r = corrected[c.id]
+                r.W_b = wb_pool * (task_costs[c.id].W_b / wb_sum)
+        # если wb_sum == 0, мостов нет, W_b уже равны 0 — ничего не меняем
+
+    return corrected
+
+
 # ---------------------------------------------------------------------------
 # Шаг 2 - приоритет через нормированную стоимость
 # ---------------------------------------------------------------------------
