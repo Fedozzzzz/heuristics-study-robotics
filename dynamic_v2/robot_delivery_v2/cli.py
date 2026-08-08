@@ -1,0 +1,188 @@
+"""
+CLI для прогона экспериментов dynamic_v2 (независимый приоритет груза).
+
+Примеры:
+    # список доступных эвристик приоритета груза
+    python -m robot_delivery_v2.cli --list-heuristics
+
+    # сравнить все 3 эвристики сразу: 20 островов, 3 пары роботов, грузов до 20,
+    # 10 случайных прогонов на каждое значение числа грузов. Число грузов
+    # пробегает диапазон 3..20 (от --n-pairs до -n). При >1 эвристике строится
+    # (среди прочих) real_vs_ncargos.png -- все эвристики на ОДНОМ графике.
+    python -m robot_delivery_v2.cli \\
+        --heuristics direct inverse random \\
+        --n-islands 20 \\
+        --n-pairs 3 \\
+        -n 20 \\
+        --n-runs 10 \\
+        --seed 42 \\
+        --output-dir outputs
+
+    # плюс детальная трасса по раундам для первой эвристики
+    python -m robot_delivery_v2.cli --heuristics direct \\
+        --n-islands 16 --n-pairs 2 -n 12 --n-runs 5 --trace --output-dir outputs
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+from .cargo_priority import CARGO_HEURISTICS
+from .experiment import cargo_sweep, run_single, run_suite
+from .plotting import (
+    export_csv,
+    plot_gap_vs_ncargos,
+    plot_real_vs_estimated_bars,
+    plot_real_vs_ncargos,
+    plot_round_trace,
+    plot_win_rate,
+)
+from .scenario import generate_scenario
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description=(
+            "Сравнение эвристической оценки и реальной стоимости в динамической "
+            "модели многороботной доставки с независимым от роботов приоритетом "
+            "грузов (dynamic_v2)."
+        )
+    )
+    p.add_argument(
+        "--list-heuristics", action="store_true",
+        help="Вывести список доступных эвристик приоритета груза p и выйти.",
+    )
+    p.add_argument(
+        "--heuristics", nargs="+", default=["direct"],
+        help=f"Эвристики для сравнения. Доступны: {', '.join(sorted(CARGO_HEURISTICS))}",
+    )
+    p.add_argument("--n-islands", type=int, default=18,
+                    help="Количество островов среды (вершин графа G).")
+    p.add_argument("--n-pairs", type=int, default=3,
+                    help="Количество доставщиков = количество строителей "
+                         "(коалиции формируются заново под каждый груз каждый раунд).")
+    p.add_argument("-n", "--n-cargos", type=int, default=20,
+                    help="Количество грузов n (верхняя граница развёртки). Цикл "
+                         "проходится по числу грузов от --n-pairs до n включительно.")
+    p.add_argument("--n-runs", type=int, default=10,
+                    help="Количество прогонов (рандомайзер) на один сценарий, т.е. "
+                         "сколько независимых случайных инстансов генерировать на "
+                         "каждое значение числа грузов.")
+    p.add_argument("--seed", type=int, default=0, help="Базовый seed генератора сценариев.")
+    p.add_argument("--free-prob", type=float, default=0.45, help="Доля рёбер FREE (остальные BLOCKED).")
+    p.add_argument("--build-cost-factor", type=float, default=3.0,
+                    help="Множитель стоимости постройки моста относительно длины.")
+    p.add_argument("--output-dir", default="outputs", help="Куда сохранять CSV и графики.")
+    p.add_argument("--trace", action="store_true",
+                    help="Дополнительно построить график накопления real/estimated по раундам "
+                         "для первой эвристики на первом сценарии.")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.list_heuristics:
+        for key in sorted(CARGO_HEURISTICS):
+            h = CARGO_HEURISTICS[key]
+            print(f"{key:10s} {h.label}\n{'':10s} {h.description}\n")
+        return 0
+
+    unknown = [h for h in args.heuristics if h not in CARGO_HEURISTICS]
+    if unknown:
+        print(f"Неизвестные эвристики: {', '.join(unknown)}", file=sys.stderr)
+        print(f"Доступные: {', '.join(sorted(CARGO_HEURISTICS))}", file=sys.stderr)
+        return 1
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    scenario_kwargs = dict(
+        free_prob=args.free_prob,
+        build_cost_factor=args.build_cost_factor,
+    )
+
+    try:
+        sweep = cargo_sweep(args.n_pairs, args.n_cargos)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    total_runs = len(args.heuristics) * len(sweep) * args.n_runs
+    print(f"Островов среды:        {args.n_islands}")
+    print(f"Пар роботов:           {args.n_pairs}")
+    print(f"Грузов n:              {args.n_cargos}")
+    print(f"Развёртка по грузам:   {sweep[0]}..{sweep[-1]} ({len(sweep)} точек)")
+    print(f"Прогонов на сценарий:  {args.n_runs}")
+    print(f"Эвристик:              {len(args.heuristics)} ({', '.join(args.heuristics)})")
+    print(f"Всего прогонов модели: {total_runs}\n")
+
+    rows = run_suite(
+        heuristic_names=args.heuristics,
+        n_runs=args.n_runs,
+        n_cargos_max=args.n_cargos,
+        n_pairs=args.n_pairs,
+        n_islands=args.n_islands,
+        base_seed=args.seed,
+        scenario_kwargs=scenario_kwargs,
+        progress=True,
+    )
+    print()
+
+    csv_path = os.path.join(args.output_dir, "experiment_results.csv")
+    export_csv(rows, csv_path)
+    print(f"Сохранено: {csv_path} ({len(rows)} строк)")
+
+    bars_path = os.path.join(args.output_dir, "real_vs_estimated_bars.png")
+    plot_real_vs_estimated_bars(rows, bars_path)
+    print(f"Сохранено: {bars_path}")
+
+    gap_raw_path = os.path.join(args.output_dir, "gap_raw_vs_ncargos.png")
+    plot_gap_vs_ncargos(rows, gap_raw_path, gap_field="gap_raw")
+    print(f"Сохранено: {gap_raw_path}")
+
+    if len(args.heuristics) > 1:
+        real_cmp_path = os.path.join(args.output_dir, "real_vs_ncargos.png")
+        plot_real_vs_ncargos(rows, real_cmp_path)
+        print(f"Сохранено: {real_cmp_path}")
+
+        winrate_path = os.path.join(args.output_dir, "win_rate.png")
+        plot_win_rate(rows, winrate_path)
+        print(f"Сохранено: {winrate_path}")
+
+    n_delivered_ratio = sum(1 for r in rows if r.all_delivered) / len(rows) if rows else 0.0
+    print(f"Доля прогонов с полной доставкой всех грузов: {n_delivered_ratio:.1%}")
+
+    n_infeasible = sum(1 for r in rows if not r.feasible)
+    if n_infeasible:
+        infeasible_ratio = n_infeasible / len(rows)
+        print(
+            f"Из них недостижимых уже на Шаге 0 (проверка достижимости): "
+            f"{n_infeasible} ({infeasible_ratio:.1%})"
+        )
+
+    if args.trace:
+        scenario = generate_scenario(
+            n_islands=args.n_islands,
+            n_cargos=args.n_cargos,
+            n_pairs=args.n_pairs,
+            seed=args.seed,
+            **scenario_kwargs,
+        )
+        result, bracket_obj = run_single(scenario, args.heuristics[0])
+        trace_path = os.path.join(args.output_dir, "round_trace.png")
+        plot_round_trace(
+            bracket_obj, trace_path,
+            title=(
+                f"{args.heuristics[0]}: real vs estimated_raw "
+                f"по раундам (n_cargos={args.n_cargos})"
+            ),
+        )
+        print(f"Сохранено: {trace_path}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
