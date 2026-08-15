@@ -14,6 +14,11 @@ built передаётся снаружи и на практике меняет�
 накапливаются и не строятся повторно), поэтому приоритеты грузов
 пересчитываются заново в начале КАЖДОГО раунда (см. scheduler.select_round).
 
+В Алгоритме 1 (см. scheduler.run_dynamic_rounds, fresh_graph_each_round=True)
+built сюда всегда приходит ПУСТЫМ: там построенное не помнится вообще, поэтому
+приоритет груза каждый раунд считается заново с полной стоимостью постройки
+всех E_blocked его маршрута. Отдельного флага здесь для этого не нужно.
+
 Приоритет p назначается одной из эвристик, зафиксированных в постановке
 задачи ("Рассматриваемые эвристики -- прямая и обратная"), плюс baseline для
 оценки их качества:
@@ -37,9 +42,14 @@ from .graph import EdgeKey, Graph, NodeId
 EPS = 1e-9
 
 
-def route_cost_for_cargo(G: Graph, start: NodeId, finish: NodeId, built: Set[EdgeKey]) -> float:
-    """W_C --- стоимость маршрута c_start -> c_finish (проезд + постройка
-    ещё не построенных мостов на этом маршруте), без участия роботов."""
+def route_cost_for_cargo(G: Graph, start: NodeId, finish: NodeId,
+                         built: Set[EdgeKey]) -> float:
+    """W_C --- стоимость маршрута c_start -> c_finish, без участия роботов:
+    проезд + стоимость постройки тех E_blocked маршрута, которых нет в built.
+
+    При built = ∅ (Алгоритм 1 -- на любом раунде) это даёт "цену с чистого
+    поля": оплачивается постройка ВСЕХ заблокированных переправ маршрута.
+    """
     r = route_and_cost(G, start, finish, built)
     if r is None:
         # Не должно происходить: Шаг 0 (check_feasibility) уже гарантирует,
@@ -116,7 +126,7 @@ def get_cargo_heuristic(name: str) -> CargoPriorityHeuristic:
 
 
 def rank_cargos(
-    G: Graph, cargos: Sequence, built: Set[EdgeKey], heuristic: CargoPriorityHeuristic
+    G: Graph, cargos: Sequence, built: Set[EdgeKey], heuristic: CargoPriorityHeuristic,
 ) -> List[Tuple[float, float, object]]:
     """Список грузов, отсортированный по убыванию приоритета p (Шаг 1).
     Возвращает [(p, W_C, cargo), ...]. Tie-break -- по cargo_id (воспроизводимость)."""

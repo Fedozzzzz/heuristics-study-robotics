@@ -36,11 +36,17 @@ class ExperimentRow:
     n_rounds: int
 
 
-def run_single(scenario: Scenario, heuristic_name: str) -> "tuple[RunResult, Dict]":
+def run_single(scenario: Scenario, heuristic_name: str,
+               fresh_graph_each_round: bool = False) -> "tuple[RunResult, Dict]":
+    """fresh_graph_each_round -- True = АЛГОРИТМ 1 (построенные мосты не
+    учитываются: изначальный граф на каждом раунде для каждой пары, постройка
+    оплачивается заново и входит в оценку), False = АЛГОРИТМ 2 (built
+    накапливается глобально)."""
     heuristic = get_cargo_heuristic(heuristic_name)
     result = run_dynamic_rounds(
         scenario.G, scenario.cargos, scenario.deliverer_positions, scenario.builder_positions,
         heuristic, rng_seed=scenario.seed,
+        fresh_graph_each_round=fresh_graph_each_round,
     )
     cargo_map = {c.cargo_id: c for c in scenario.cargos}
     bracket = compute_dynamic_cost_bracket(scenario.G, result.T, cargo_map)

@@ -3,7 +3,17 @@
 распределения грузов по раундам, dynamic_v2 --- см. README.md об отличиях от
 dynamic/. built (возведённые переправы) --- ГЛОБАЛЬНОЕ состояние, общее для
 всех раундов: однажды построенный мост никогда не строится повторно (Шаг 4 в
-постановке задачи).
+постановке задачи). Это АЛГОРИТМ 2.
+
+АЛГОРИТМ 1 (run_dynamic_rounds(..., fresh_graph_each_round=True)) отличается
+ровно тем, что построенное НЕ ПОМНИТСЯ ВООБЩЕ, ни на одном шаге: граф берётся
+в изначальном виде на каждом раунде и для каждой пары роботов, built всегда
+пуст, каждая пара строит все переправы своего маршрута сама и полностью
+оплачивает их постройку (Шаг 4 при этом отключается -- делить между коалициями
+нечего). Никакой истории возведённого не ведётся, поэтому и приоритет груза на
+Шаге 1 каждый раз считается заново с полной стоимостью постройки. Всё
+остальное -- проверка достижимости, формирование коалиций, барьерная
+синхронизация -- у обоих алгоритмов один и тот же код.
 
 Шаг 1 (RANK-CARGOS, cargo_priority.py): приоритет груза p считается ТОЛЬКО по
 стоимости его собственного маршрута c_start -> c_finish, независимо от того,
@@ -155,10 +165,18 @@ def select_round(
     cargo_heuristic: CargoPriorityHeuristic,
     round_index: int,
     rng: random.Random,
+    fresh_graph_each_round: bool = False,
 ) -> Tuple[List[ScheduleRecord], Set[EdgeKey]]:
     """Один раунд: Шаг 1 (приоритет грузов) + Шаг 2 (отбор N грузов и
     формирование коалиций под них) + Шаги 3-4 (оценка раунда, разрешение
-    коллизий за общие мосты). Возвращает (назначения, обновлённый built)."""
+    коллизий за общие мосты). Возвращает (назначения, обновлённый built).
+
+    fresh_graph_each_round=True -- режим АЛГОРИТМА 1: граф берётся в
+    ИЗНАЧАЛЬНОМ виде для КАЖДОЙ пары раунда. Вызывающая сторона передаёт при
+    этом built = ∅ (см. run_dynamic_rounds), а Шаг 4 отключается: коалиции
+    раунда не делят между собой ни одного моста, каждая пара строит все
+    переправы своего маршрута сама и платит за них полностью. Никакой памяти о
+    построенном при этом не ведётся вообще -- в том числе на Шаге 1."""
 
     n_deliverers = len(deliverer_pos)
     n_builders = len(builder_pos)
@@ -205,17 +223,22 @@ def select_round(
         return [], set(built)
 
     # --- Шаг 4: конфликт за один и тот же ещё не построенный мост между
-    #     несколькими коалициями раунда -- случайный победитель ---
-    edge_users: Dict[EdgeKey, List[int]] = {}
-    for idx, (_c, _cargo, est, _p) in enumerate(formed):
-        for ek in est.bridges:
-            if ek in built:
-                continue
-            edge_users.setdefault(ek, []).append(idx)
-
+    #     несколькими коалициями раунда -- случайный победитель.
+    #     В режиме АЛГОРИТМА 1 шаг отключён: граф изначальный для КАЖДОЙ пары,
+    #     общих мостов между коалициями нет, каждая строит своё сама. Пустой
+    #     winner_of_edge как раз это и означает -- ниже
+    #     winner_of_edge.get(ek, idx) == idx для любой коалиции. ---
     winner_of_edge: Dict[EdgeKey, int] = {}
-    for ek, users in edge_users.items():
-        winner_of_edge[ek] = users[0] if len(users) == 1 else rng.choice(users)
+    if not fresh_graph_each_round:
+        edge_users: Dict[EdgeKey, List[int]] = {}
+        for idx, (_c, _cargo, est, _p) in enumerate(formed):
+            for ek in est.bridges:
+                if ek in built:
+                    continue
+                edge_users.setdefault(ek, []).append(idx)
+
+        for ek, users in edge_users.items():
+            winner_of_edge[ek] = users[0] if len(users) == 1 else rng.choice(users)
 
     built_after: Set[EdgeKey] = set(built)
     records: List[ScheduleRecord] = []
@@ -260,7 +283,9 @@ def select_round(
             )
         )
 
-    return records, built_after
+    # В режиме Алгоритма 1 построенное НЕ переносится в следующий раунд:
+    # каждый раунд начинается с изначального графа.
+    return records, (set(built) if fresh_graph_each_round else built_after)
 
 
 @dataclass
@@ -284,11 +309,31 @@ def run_dynamic_rounds(
     cargo_heuristic: CargoPriorityHeuristic,
     max_rounds: int = 10_000,
     rng_seed: int = 0,
+    fresh_graph_each_round: bool = False,
 ) -> RunResult:
     """Algorithm RUN-DYNAMIC-ROUNDS(G, C, R_d, R_b). rng_seed -- сид
     генератора случайности для Шага 4 (случайный выбор коалиции, оплачивающей
     постройку моста при коллизии); прогон с одинаковым rng_seed полностью
-    воспроизводим."""
+    воспроизводим.
+
+    fresh_graph_each_round -- ОТЛИЧИЕ ДВУХ АЛГОРИТМОВ ПОСТАНОВКИ:
+
+      True  -> АЛГОРИТМ 1: уже построенные мосты не помнятся вообще. Граф
+               берётся в ИЗНАЧАЛЬНОМ виде на каждом раунде и для каждой пары
+               роботов: built никогда не накапливается (всегда ∅), поэтому
+               пара строит все переправы на пути к своей цели заново, как
+               будто до этого раунда не было построено ничего, и стоимость
+               этой постройки суммируется в общую оценку. Коалиции одного
+               раунда тоже не делят мосты между собой (Шаг 4 отключён), и
+               приоритет груза на Шаге 1 каждый раунд считается заново с
+               полной стоимостью постройки всех E_blocked его маршрута.
+      False -> АЛГОРИТМ 2 (базовое поведение модели): built -- глобальное
+               накопительное состояние, однажды построенный мост больше не
+               строится и не оплачивается, а внутри раунда работает Шаг 4
+               (за общий мост платит один случайно выбранный победитель).
+
+    Шаги 0, 1, 2, 5, 6 в обоих случаях выполняются одним и тем же кодом --
+    разница целиком в том, какое built они видят."""
 
     deliverer_pos: Dict[RobotId, NodeId] = {i: p for i, p in enumerate(deliverer_positions)}
     builder_pos: Dict[RobotId, NodeId] = {i: p for i, p in enumerate(builder_positions)}
@@ -309,7 +354,7 @@ def run_dynamic_rounds(
         )
 
     pending: Dict[CargoId, Cargo] = {c.cargo_id: c for c in cargos}
-    built: Set[EdgeKey] = set()
+    built: Set[EdgeKey] = set()  # в Алгоритме 1 остаётся пустым на всём прогоне
     rng = random.Random(rng_seed)
 
     T: List[ScheduleRecord] = []
@@ -323,6 +368,7 @@ def run_dynamic_rounds(
         records, built = select_round(
             G, cargo_snapshot, dict(deliverer_pos), dict(builder_pos), built,
             cargo_heuristic, round_index, rng,
+            fresh_graph_each_round=fresh_graph_each_round,
         )
         if not records:
             break  # остаток недостижим/неразрешим при текущем состоянии роботов
