@@ -45,8 +45,10 @@ static_v3 это, по её постановке (Шаг 5), и есть эвр�
 стоимости собственного маршрута груза c_start -> c_finish и пересчитывается
 каждый раунд:
 
-  direct  -- дороже груз -- выше приоритет (эвристика постановки)
-  inverse -- дешевле груз -- выше приоритет
+  inverse -- p(c_i) = 1 / W_T^i: дешевле груз -- выше приоритет. ЗНАЧЕНИЕ ПО
+             УМОЛЧАНИЮ этого эксперимента: динамическая модель прогоняется
+             именно с обратной эвристикой
+  direct  -- p(c_i) = W_T^i: дороже груз -- выше приоритет
   random  -- baseline: p ~ U(0,1), от стоимости не зависит
 
 В static_v3 приоритетов НЕТ ВООБЩЕ: и пары, и распределение грузов случайны,
@@ -57,14 +59,29 @@ static_v3 на графиках ОДНА И ТА ЖЕ при любом --heuris
 накопленных мостов), когда порядок грузов у динамической модели тоже случаен.
 
 =============================================================================
-ПОВТОРЫ У СЛУЧАЙНОЙ МОДЕЛИ (--v3-repeats)
+ПОВТОРЫ (--repeats) -- ОДИНАКОВОЕ ЧИСЛО ПРОГОНОВ У ОБЕИХ МОДЕЛЕЙ
 
-static_v3 случайна целиком, поэтому один её прогон -- это одна реализация
-случайной величины, а не характеристика сценария. В точке свипа модель
-прогоняется --v3-repeats раз с разными сидами, и на график идёт СРЕДНЕЕ; полоса
-вокруг кривой -- min..max по этим прогонам, то есть диапазон, в который
-случайная модель попадает "по везению". Если кривая dynamic_v2 лежит ниже
-нижней границы полосы, её преимущество не объясняется удачным розыгрышем.
+Случайны ОБЕ модели, поэтому в точке свипа каждая прогоняется --repeats раз с
+разными сидами (одна и та же сетка сидов у обеих), и на график идёт СРЕДНЕЕ по
+стоимости и МЕДИАНА по времени; полоса вокруг каждой кривой -- min..max по
+прогонам, то есть диапазон, в который модель попадает "по везению". Сравнивать
+среднее одной модели с единственной реализацией другой было бы некорректно.
+
+  static_v3 случайна целиком: и паросочетание (Шаг 2), и раздача грузов
+      (Шаг 3) разыгрываются заново на каждом прогоне.
+  dynamic_v2 случайна в одной точке -- Шаг 4, выбор коалиции, оплачивающей
+      мост при конфликте за него (rng.choice в scheduler.select_round). Сама
+      по себе оплата на суммарную Phi не влияет (мост оплачивается ровно один
+      раз в любом случае), но два следствия делают прогон невоспроизводимым
+      при другом сиде: проигравшие пересчитывают задачу с уже бесплатным
+      мостом и могут выбрать ДРУГОЙ маршрут, а позиция строителя в следующем
+      раунде -- это конец ЛИЧНО построенного им моста, то есть зависит от
+      исхода жребия. Разброс у dynamic_v2 заметно уже, чем у static_v3, но не
+      нулевой -- на прямой эвристике он местами сопоставим с ним.
+
+Если полоса dynamic_v2 целиком лежит ниже полосы static_v3, преимущество
+динамической модели не объясняется удачным розыгрышем ни у той, ни у другой --
+именно это считает последняя строка сводки.
 
 =============================================================================
 ОДИН И ТОТ ЖЕ НАБОР ВХОДНЫХ ДАННЫХ ДЛЯ ОБЕИХ МОДЕЛЕЙ (см. build_common_scenario)
@@ -84,6 +101,9 @@ graph.py / costs.py / feasibility.py (текстуально совпадающ�
 ЗАПУСК:
     python experiments/compare_static_v3_vs_dynamic_v2.py \\
         --n-islands 20 --n-pairs 5 -n 100 --cargo-step 5 --seed 7
+
+    # прямая эвристика вместо обратной (по умолчанию -- inverse, p = 1 / W_T)
+    python experiments/compare_static_v3_vs_dynamic_v2.py --heuristic direct
 
     # сколько даёт одна лишь динамичность, без вклада эвристики приоритета
     python experiments/compare_static_v3_vs_dynamic_v2.py --heuristic random
@@ -126,7 +146,7 @@ from robot_delivery_v2.scheduler import Cargo as DynamicCargo, run_dynamic_round
 
 # Идентичность серий кодируется НЕ только цветом: у каждой свои маркер и тип
 # линии, поэтому кривые различимы в ч/б и при дальтонизме.
-COLOR_V3, COLOR_DYNAMIC = "#c0392b", "#1b7a4b"
+COLOR_V3, COLOR_DYNAMIC = "#1f5fa8", "#c0392b"
 STYLE_V3 = dict(color=COLOR_V3, marker="s", linestyle="--", markersize=3.5)
 STYLE_DYNAMIC = dict(color=COLOR_DYNAMIC, marker="^", linestyle="-", markersize=3.5)
 
@@ -136,8 +156,8 @@ LABEL_DYNAMIC = ("Динамическая модель (dynamic_v2): коали
                  "приоритеты пересчитываются каждый раунд")
 
 HEURISTIC_TITLE = {
-    "direct": "прямая (дороже груз — выше приоритет)",
-    "inverse": "обратная (дешевле груз — выше приоритет)",
+    "direct": "прямая, p = W_T (дороже груз — выше приоритет)",
+    "inverse": "обратная, p = 1 / W_T (дешевле груз — выше приоритет)",
     "random": "случайная (baseline: остаётся только динамичность)",
 }
 
@@ -295,29 +315,52 @@ def to_dynamic_inputs(scen: CommonScenario, n_cargos: int):
 # Прогон одной точки свипа
 # ---------------------------------------------------------------------------
 
+# Шаг сетки сидов внутри точки свипа. Сиды прогонов -- seed + rep * SEED_STRIDE:
+# большое простое число, чтобы прогоны точки не оказались коррелированы и чтобы
+# наборы сидов соседних точек свипа не совпадали поэлементно.
+SEED_STRIDE = 100_003
+
+
 @dataclass
 class PointResult:
-    """Результат точки свипа для одной модели.
+    """Результат точки свипа для одной модели -- агрегат по --repeats прогонам
+    с разными сидами. Случайны ОБЕ модели, поэтому структура у обеих одна и та
+    же (см. шапку файла).
 
-    cost -- то, что идёт на график (для static_v3 -- среднее по повторам);
-    lo/hi -- min/max по повторам (для dynamic_v2 совпадают с cost: модель
-    детерминирована при фиксированном сценарии и сиде)."""
+    cost -- СРЕДНЕЕ по прогонам, lo/hi -- min..max (полоса разброса);
+    time_ms -- МЕДИАНА времени (замер времени шумит выбросами планировщика ОС,
+    и одиночный выброс не должен утаскивать кривую), time_lo/time_hi --
+    min..max по тем же прогонам."""
     cost: float
     lo: float
     hi: float
     time_ms: float
+    time_lo: float
+    time_hi: float
     ok: bool
     n_rounds: int
+
+
+def _aggregate(costs: List[float], times: List[float], ok_all: bool,
+               n_rounds: int) -> PointResult:
+    """Свод прогонов одной точки в PointResult. Прогоны, где не все грузы
+    доставлены, дают nan и в агрегат стоимости не попадают; время меряется по
+    всем прогонам."""
+    good = [c for c in costs if not math.isnan(c)]
+    t_ms, t_lo, t_hi = median(times), min(times), max(times)
+    if not good:
+        nan = float("nan")
+        return PointResult(cost=nan, lo=nan, hi=nan, time_ms=t_ms,
+                           time_lo=t_lo, time_hi=t_hi, ok=False, n_rounds=n_rounds)
+    return PointResult(cost=mean(good), lo=min(good), hi=max(good), time_ms=t_ms,
+                       time_lo=t_lo, time_hi=t_hi, ok=ok_all, n_rounds=n_rounds)
 
 
 def run_v3_point(scen: CommonScenario, n_cargos: int, repeats: int,
                  assignment_mode: str) -> PointResult:
     """Полный пайплайн СЛУЧАЙНОЙ статической модели (RUN-RANDOM-STATIC): Шаг 0
     -> случайное паросочетание -> случайная раздача грузов -> исполнение по
-    раундам.
-
-    repeats -- повторы САМОЙ МОДЕЛИ с разными сидами случайности. На график
-    идёт среднее, полоса -- min..max."""
+    раундам. repeats прогонов с разными сидами."""
     times: List[float] = []
     costs: List[float] = []
     ok_all = True
@@ -330,7 +373,7 @@ def run_v3_point(scen: CommonScenario, n_cargos: int, repeats: int,
         t0 = time.perf_counter()
         result = run_random_static(G, cargos, d_pos, b_pos,
                                    assignment_mode=assignment_mode,
-                                   rng_seed=scen.seed + rep * 100_003)
+                                   rng_seed=scen.seed + rep * SEED_STRIDE)
         times.append((time.perf_counter() - t0) * 1000.0)
 
         ok = result.feasible and result.all_delivered
@@ -338,13 +381,7 @@ def run_v3_point(scen: CommonScenario, n_cargos: int, repeats: int,
         n_rounds = max(n_rounds, result.n_rounds)
         costs.append(result.real if ok else float("nan"))
 
-    good = [c for c in costs if not math.isnan(c)]
-    if not good:
-        nan = float("nan")
-        return PointResult(cost=nan, lo=nan, hi=nan, time_ms=median(times),
-                           ok=False, n_rounds=n_rounds)
-    return PointResult(cost=mean(good), lo=min(good), hi=max(good),
-                       time_ms=median(times), ok=ok_all, n_rounds=n_rounds)
+    return _aggregate(costs, times, ok_all, n_rounds)
 
 
 def run_dynamic_point(scen: CommonScenario, n_cargos: int, repeats: int,
@@ -353,23 +390,29 @@ def run_dynamic_point(scen: CommonScenario, n_cargos: int, repeats: int,
     built (Алгоритм 2 постановки dynamic_v2) и эвристикой приоритета груза (от
     W_C), пересчитываемой каждый раунд.
 
-    repeats здесь -- только повторы ЗАМЕРА ВРЕМЕНИ: сама модель при
-    фиксированном сценарии и сиде детерминирована."""
+    repeats прогонов идут по ТОЙ ЖЕ сетке сидов, что и у static_v3. Сид здесь
+    управляет Шагом 4 -- жребием, кто из коалиций раунда платит за общий мост;
+    через выбор маршрута проигравшими и через позиции строителей это меняет и
+    итоговую Phi (см. шапку файла)."""
     heuristic = get_dynamic_heuristic(heuristic_key)
     times: List[float] = []
-    result = None
-    for _ in range(repeats):
+    costs: List[float] = []
+    ok_all = True
+    n_rounds = 0
+    for rep in range(repeats):
         G, cargos, d_pos, b_pos = to_dynamic_inputs(scen, n_cargos)
 
         t0 = time.perf_counter()
         result = run_dynamic_rounds(G, cargos, d_pos, b_pos, heuristic,
-                                    rng_seed=scen.seed)
+                                    rng_seed=scen.seed + rep * SEED_STRIDE)
         times.append((time.perf_counter() - t0) * 1000.0)
 
-    ok = result.feasible and result.all_delivered
-    cost = (result.W_d_total + result.W_b_total) if ok else float("nan")
-    return PointResult(cost=cost, lo=cost, hi=cost, time_ms=median(times),
-                       ok=ok, n_rounds=result.n_rounds)
+        ok = result.feasible and result.all_delivered
+        ok_all = ok_all and ok
+        n_rounds = max(n_rounds, result.n_rounds)
+        costs.append((result.W_d_total + result.W_b_total) if ok else float("nan"))
+
+    return _aggregate(costs, times, ok_all, n_rounds)
 
 
 def sweep(args):
@@ -384,8 +427,8 @@ def sweep(args):
     dyn_points: List[PointResult] = []
 
     for n in cargo_range:
-        p3 = run_v3_point(scen, n, args.v3_repeats, args.v3_assignment)
-        pd = run_dynamic_point(scen, n, args.time_repeats, args.heuristic)
+        p3 = run_v3_point(scen, n, args.repeats, args.v3_assignment)
+        pd = run_dynamic_point(scen, n, args.repeats, args.heuristic)
 
         v3_points.append(p3)
         dyn_points.append(pd)
@@ -399,7 +442,8 @@ def sweep(args):
             cheaper = "="
         print(f"n={n:4d}   v3: Phi={p3.cost:10.2f} [{p3.lo:9.2f}..{p3.hi:9.2f}] "
               f"t={p3.time_ms:7.2f}мс раундов={p3.n_rounds:3d}   |   "
-              f"динам.: Phi={pd.cost:10.2f} t={pd.time_ms:8.2f}мс раундов={pd.n_rounds:3d}   "
+              f"динам.: Phi={pd.cost:10.2f} [{pd.lo:9.2f}..{pd.hi:9.2f}] "
+              f"t={pd.time_ms:8.2f}мс раундов={pd.n_rounds:3d}   "
               f"дешевле: {cheaper}{flag}")
 
     return cargo_range, v3_points, dyn_points
@@ -413,9 +457,16 @@ def plot(cargo_range, v3_points, dyn_points, args, filename):
     cost_3 = [p.cost for p in v3_points]
     lo_3 = [p.lo for p in v3_points]
     hi_3 = [p.hi for p in v3_points]
-    cost_d = [p.cost for p in dyn_points]
     time_3 = [p.time_ms for p in v3_points]
+    tlo_3 = [p.time_lo for p in v3_points]
+    thi_3 = [p.time_hi for p in v3_points]
+
+    cost_d = [p.cost for p in dyn_points]
+    lo_d = [p.lo for p in dyn_points]
+    hi_d = [p.hi for p in dyn_points]
     time_d = [p.time_ms for p in dyn_points]
+    tlo_d = [p.time_lo for p in dyn_points]
+    thi_d = [p.time_hi for p in dyn_points]
 
     fig, axes = plt.subplots(3, 2, figsize=(13, 13))
 
@@ -431,38 +482,66 @@ def plot(cargo_range, v3_points, dyn_points, args, filename):
         ax.set_title(title, fontsize=10, fontweight="bold")
         ax.grid(True, linestyle="--", alpha=0.35)
 
-    def single(ax, y, style, ylabel, title):
-        ax.plot(cargo_range, y, linewidth=2.0, **style)
-        decorate(ax, ylabel, title)
+    def band(ax, y, lo, hi, style, color, alpha=0.15, label=None, band_label=None):
+        """Кривая + полоса min..max по прогонам. Полоса есть у ОБЕИХ моделей:
+        случайны обе (см. шапку файла)."""
+        ax.plot(cargo_range, y, linewidth=2.0, label=label, **style)
+        ax.fill_between(cargo_range, lo, hi, color=color, alpha=alpha,
+                        linewidth=0, label=band_label)
 
-    ax = axes[0, 0]
-    ax.plot(cargo_range, cost_3, linewidth=2.0, **style_3)
-    ax.fill_between(cargo_range, lo_3, hi_3, color=COLOR_V3, alpha=0.15)
-    decorate(ax, "Стоимость Φ",
-             f"Случайная статическая модель (static_v3), baseline\n"
-             f"Среднее по {args.v3_repeats} прогонам, полоса -- min..max")
-    single(axes[0, 1], time_3, style_3, "Время расчёта, мс",
-           "Случайная статическая модель (static_v3)\nРеальное время работы расчёта")
+    # Вторая строка заголовка -- как агрегированы прогоны точки. Стоимость
+    # усредняется, время берётся медианой: замер времени шумит выбросами
+    # планировщика ОС, и одиночный выброс не должен утаскивать кривую.
+    agg_cost = f"Среднее по {args.repeats} прогонам, полоса -- min..max"
+    agg_time = f"Время расчёта: медиана по {args.repeats} прогонам, полоса min..max"
 
-    single(axes[1, 0], cost_d, style_d, "Стоимость Φ",
-           "Динамическая модель (dynamic_v2)\n"
-           "Фактическая стоимость выполнения всех операций")
-    single(axes[1, 1], time_d, style_d, "Время расчёта, мс",
-           "Динамическая модель (dynamic_v2)\nРеальное время работы расчёта")
+    band(axes[0, 0], cost_3, lo_3, hi_3, style_3, COLOR_V3)
+    decorate(axes[0, 0], "Стоимость Φ",
+             f"Случайная статическая модель (static_v3), baseline\n{agg_cost}")
+
+    band(axes[0, 1], time_3, tlo_3, thi_3, style_3, COLOR_V3)
+    decorate(axes[0, 1], "Время расчёта, мс",
+             f"Случайная статическая модель (static_v3)\n{agg_time}")
+
+    band(axes[1, 0], cost_d, lo_d, hi_d, style_d, COLOR_DYNAMIC)
+    decorate(axes[1, 0], "Стоимость Φ",
+             f"Динамическая модель (dynamic_v2)\n{agg_cost}")
+
+    band(axes[1, 1], time_d, tlo_d, thi_d, style_d, COLOR_DYNAMIC)
+    decorate(axes[1, 1], "Время расчёта, мс",
+             f"Динамическая модель (dynamic_v2)\n{agg_time}")
+
+    # Ряды 1 и 2 -- одна и та же величина у двух моделей, поэтому шкала Y у них
+    # ОБЩАЯ (объединение автоматических пределов). Иначе matplotlib растягивает
+    # каждый график по своим данным, обе кривые выглядят одинаково и разница
+    # между моделями на глаз не читается вообще.
+    def share_ylim(ax_a, ax_b):
+        lo = min(ax_a.get_ylim()[0], ax_b.get_ylim()[0])
+        hi = max(ax_a.get_ylim()[1], ax_b.get_ylim()[1])
+        ax_a.set_ylim(lo, hi)
+        ax_b.set_ylim(lo, hi)
+
+    share_ylim(axes[0, 0], axes[1, 0])   # стоимость Φ
+    share_ylim(axes[0, 1], axes[1, 1])   # время расчёта
+
+    BAND_V3 = "static_v3: разброс по случайности (min..max)"
+    BAND_DYNAMIC = "dynamic_v2: разброс по случайности (min..max)"
 
     ax = axes[2, 0]
-    ax.plot(cargo_range, cost_3, linewidth=2.0, label=LABEL_V3, **style_3)
-    ax.plot(cargo_range, cost_d, linewidth=2.0, label=LABEL_DYNAMIC, **style_d)
-    ax.fill_between(cargo_range, lo_3, hi_3, color=COLOR_V3, alpha=0.12,
-                    label="static_v3: разброс по случайности (min..max)")
+    band(ax, cost_3, lo_3, hi_3, style_3, COLOR_V3, alpha=0.12,
+         label=LABEL_V3, band_label=BAND_V3)
+    band(ax, cost_d, lo_d, hi_d, style_d, COLOR_DYNAMIC, alpha=0.12,
+         label=LABEL_DYNAMIC, band_label=BAND_DYNAMIC)
     decorate(ax, "Стоимость Φ",
              "СРАВНЕНИЕ: фактическая стоимость выполнения всех операций\n"
              "(ниже = дешевле обошлась доставка всех грузов)")
     ax.legend(fontsize=8, loc="upper left")
 
     ax = axes[2, 1]
-    ax.plot(cargo_range, time_3, linewidth=2.0, label=LABEL_V3, **style_3)
-    ax.plot(cargo_range, time_d, linewidth=2.0, label=LABEL_DYNAMIC, **style_d)
+    band(ax, time_3, tlo_3, thi_3, style_3, COLOR_V3, alpha=0.12,
+         label=LABEL_V3, band_label=BAND_V3)
+    band(ax, time_d, tlo_d, thi_d, style_d, COLOR_DYNAMIC, alpha=0.12,
+         label=LABEL_DYNAMIC, band_label=BAND_DYNAMIC)
     decorate(ax, "Время расчёта, мс",
              "СРАВНЕНИЕ: реальное время работы расчёта\n"
              "(static_v3 не считает приоритетов вообще)")
@@ -478,7 +557,9 @@ def plot(cargo_range, v3_points, dyn_points, args, filename):
         f"Шаг 3 static_v3: "
         f"{V3_ASSIGNMENT_TITLE.get(args.v3_assignment, args.v3_assignment)}\n"
         f"Обе модели на ОДНОМ наборе входных данных (граф островов, позиции "
-        f"роботов и число роботов фиксированы; меняется только число грузов)",
+        f"роботов и число роботов фиксированы; меняется только число грузов)\n"
+        f"Случайны ОБЕ модели: каждая точка -- {args.repeats} прогонов каждой "
+        f"модели по одной и той же сетке сидов, полоса вокруг кривой -- min..max",
         fontsize=10)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(filename, dpi=150)
@@ -491,12 +572,18 @@ def export_csv(path, cargo_range, v3_points, dyn_points):
         w = csv.writer(f)
         w.writerow(["n_cargos",
                     "static_v3_cost_mean", "static_v3_cost_min", "static_v3_cost_max",
-                    "static_v3_time_ms", "static_v3_rounds",
-                    "dynamic_v2_cost", "dynamic_v2_time_ms", "dynamic_v2_rounds"])
+                    "static_v3_time_ms_median", "static_v3_time_ms_min",
+                    "static_v3_time_ms_max", "static_v3_rounds",
+                    "dynamic_v2_cost_mean", "dynamic_v2_cost_min", "dynamic_v2_cost_max",
+                    "dynamic_v2_time_ms_median", "dynamic_v2_time_ms_min",
+                    "dynamic_v2_time_ms_max", "dynamic_v2_rounds"])
         for i, n in enumerate(cargo_range):
             p3, pd = v3_points[i], dyn_points[i]
-            w.writerow([n, p3.cost, p3.lo, p3.hi, p3.time_ms, p3.n_rounds,
-                        pd.cost, pd.time_ms, pd.n_rounds])
+            w.writerow([n,
+                        p3.cost, p3.lo, p3.hi,
+                        p3.time_ms, p3.time_lo, p3.time_hi, p3.n_rounds,
+                        pd.cost, pd.lo, pd.hi,
+                        pd.time_ms, pd.time_lo, pd.time_hi, pd.n_rounds])
     print(f"Сохранено: {path}")
 
 
@@ -506,7 +593,7 @@ def report(cargo_range, v3_points, dyn_points):
 
     print("\n=== СВОДКА (обе модели на одном наборе входных данных) ===")
     print("  Phi -- фактическая стоимость выполнения всех операций, W_d_total + W_b_total")
-    print("  для static_v3 -- среднее по повторам со случайными сидами")
+    print("  у ОБЕИХ моделей -- среднее по прогонам со случайными сидами")
     for i in (0, len(cargo_range) - 1):
         n = cargo_range[i]
         d = 100 * (1 - cost_d[i] / cost_3[i]) if cost_3[i] else float("nan")
@@ -525,11 +612,27 @@ def report(cargo_range, v3_points, dyn_points):
     if gains:
         print(f"    в среднем динамика дешевле случайной модели на {mean(gains):+.2f}%")
 
-    # насколько выигрыш выходит за пределы случайного разброса
-    beats_band = sum(1 for p3, pd in zip(v3_points, dyn_points) if pd.cost < p3.lo - 1e-9)
-    print(f"    точек, где dynamic_v2 дешевле ЛУЧШЕГО из прогонов static_v3: "
-          f"{beats_band} из {len(cargo_range)}")
-    print("    (это и есть выигрыш, который нельзя объяснить удачным розыгрышем)")
+    # насколько выигрыш выходит за пределы случайного разброса ОБЕИХ моделей
+    beats_band = sum(1 for p3, pd in zip(v3_points, dyn_points) if pd.hi < p3.lo - 1e-9)
+    print(f"    точек, где ХУДШИЙ прогон dynamic_v2 дешевле ЛУЧШЕГО прогона "
+          f"static_v3: {beats_band} из {len(cargo_range)}")
+    print("    (полосы разброса не пересекаются -- выигрыш нельзя объяснить "
+          "удачным розыгрышем)")
+
+    # ширина полос: показывает, насколько вообще осмысленно усреднение
+    def band_width(points):
+        w = [100 * (p.hi - p.lo) / p.cost for p in points if p.cost]
+        return mean(w) if w else float("nan")
+
+    def time_band_width(points):
+        w = [100 * (p.time_hi - p.time_lo) / p.time_ms for p in points if p.time_ms]
+        return mean(w) if w else float("nan")
+
+    print(f"\n  средний размах (max-min) по прогонам точки:")
+    print(f"    Phi:    static_v3 {band_width(v3_points):5.2f}%   "
+          f"dynamic_v2 {band_width(dyn_points):5.2f}%")
+    print(f"    время:  static_v3 {time_band_width(v3_points):5.2f}%   "
+          f"dynamic_v2 {time_band_width(dyn_points):5.2f}%")
 
     t_ratio = [b / a for a, b in zip((p.time_ms for p in v3_points),
                                      (p.time_ms for p in dyn_points)) if a]
@@ -554,7 +657,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cargo-step", type=int, default=2,
                    help="шаг развёртки по числу грузов")
     p.add_argument("--seed", type=int, default=7)
-    p.add_argument("--heuristic", default="direct", choices=sorted(DYNAMIC_HEURISTICS),
+    p.add_argument("--heuristic", default="inverse", choices=sorted(DYNAMIC_HEURISTICS),
                    help="эвристика приоритета груза ДИНАМИЧЕСКОЙ модели (у "
                         "static_v3 приоритетов нет вообще, её кривая от этого "
                         "параметра не зависит). random особенно нагляден: "
@@ -564,13 +667,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "balanced -- перемешать и раздать по кругу (число грузов у "
                         "пар отличается максимум на 1), uniform -- каждому грузу "
                         "независимо случайная пара")
-    p.add_argument("--v3-repeats", type=int, default=7,
-                   help="повторов СЛУЧАЙНОЙ модели на точку свипа (разные сиды): на "
-                        "график идёт среднее, полоса -- min..max. Один прогон "
-                        "случайной модели -- это одна реализация, а не "
-                        "характеристика сценария")
-    p.add_argument("--time-repeats", type=int, default=5,
-                   help="повторов замера времени dynamic_v2 на точку (берётся медиана)")
+    # --v3-repeats/--time-repeats -- прежние имена того же параметра: раньше он
+    # задавал повторы только static_v3 (и отдельно -- повторы замера времени).
+    # Оставлены, чтобы сохранённые командные строки продолжали работать.
+    p.add_argument("--repeats", "--v3-repeats", "--time-repeats", type=int,
+                   default=7, dest="repeats",
+                   help="прогонов КАЖДОЙ из двух моделей на точку свипа, по одной "
+                        "и той же сетке сидов: на график идёт среднее (стоимость) "
+                        "и медиана (время), полоса -- min..max. Случайны обе "
+                        "модели, один прогон любой из них -- это одна реализация, "
+                        "а не характеристика сценария")
     p.add_argument("--free-prob", type=float, default=0.45)
     p.add_argument("--build-cost-factor", type=float, default=3.0)
     p.add_argument("--output-dir",
@@ -583,15 +689,17 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.n_cargos_min is None:
         args.n_cargos_min = args.n_pairs
-    if args.v3_repeats < 1:
-        print("--v3-repeats должен быть >= 1", file=sys.stderr)
+    if args.repeats < 1:
+        print("--repeats должен быть >= 1", file=sys.stderr)
         return 1
     os.makedirs(args.output_dir, exist_ok=True)
 
     print(f"Островов: {args.n_islands}, пар: {args.n_pairs}, seed: {args.seed}")
     print(f"Эвристика приоритета dynamic_v2: {args.heuristic} "
           f"(у static_v3 приоритетов нет)")
-    print(f"Шаг 3 static_v3: {args.v3_assignment}, повторов на точку: {args.v3_repeats}\n")
+    print(f"Шаг 3 static_v3: {args.v3_assignment}")
+    print(f"Прогонов на точку: {args.repeats} у КАЖДОЙ модели "
+          f"(сиды {args.seed} + rep*{SEED_STRIDE})\n")
 
     t0 = time.time()
     cargo_range, v3_points, dyn_points = sweep(args)
